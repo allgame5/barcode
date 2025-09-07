@@ -1,0 +1,231 @@
+<!doctype html>
+<html lang="de">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Barcode Scanner &amp; Saver</title>
+  <script src="https://cdn.jsdelivr.net/npm/quagga@0.12.1/dist/quagga.min.js"></script>
+  <!-- Firebase (compat) -->
+  <script src="https://www.gstatic.com/firebasejs/9.22.0/firebase-app-compat.js"></script>
+  <script src="https://www.gstatic.com/firebasejs/9.22.0/firebase-firestore-compat.js"></script>
+  <style>
+    :root{font-family:Inter, system-ui, -apple-system, 'Segoe UI', Roboto, 'Helvetica Neue', Arial;}
+    body{background:#f3f6f9;color:#222;padding:24px;}
+    .card{max-width:980px;margin:0 auto;background:#fff;border-radius:10px;padding:18px;box-shadow:0 6px 20px rgba(30,40,50,.06);} 
+    header{display:flex;align-items:center;gap:14px;margin-bottom:14px}
+    h1{font-size:20px;margin:0}
+    .grid{display:grid;grid-template-columns:1fr 360px;gap:16px}
+    .controls{padding:8px}
+    label{display:block;font-size:13px;margin:8px 0 6px}
+    input[type=text],input[type=number],select{width:100%;padding:10px;border:1px solid #e2e8f0;border-radius:8px;font-size:14px}
+    button{background:#0f62fe;color:#fff;border:none;padding:10px 12px;border-radius:8px;cursor:pointer;font-weight:600}
+    button.ghost{background:#eef2ff;color:#0f62fe}
+    #scanner{width:100%;height:360px;border-radius:8px;overflow:hidden;background:#000;display:flex;align-items:center;justify-content:center}
+    #result{margin-top:12px;padding:10px;border-radius:8px;background:#f8fafc;border:1px solid #e6eef9}
+    table{width:100%;border-collapse:collapse;margin-top:8px}
+    th,td{padding:8px;border-bottom:1px solid #f1f5f9;text-align:left}
+    .small{font-size:13px;color:#475569}
+  </style>
+</head>
+<body>
+  <div class="card">
+    <header>
+      <h1>Barcode-Scanner &amp; Speicher</h1>
+      <div class="small">Scan mit Kamera, speichern in Firestore &amp; lokal</div>
+    </header>
+
+    <div class="grid">
+      <div>
+        <div id="scanner">
+          <div id="interactive" class="viewport">Kamera-Feed wird hier angezeigt (HTTPS benötigt)</div>
+        </div>
+
+        <div style="display:flex;gap:8px;margin-top:10px">
+          <button id="startBtn">Scan starten</button>
+          <button id="stopBtn" class="ghost" style="display:none">Scan stoppen</button>
+        </div>
+
+        <div id="result">
+          <div id="detected" class="small">Noch kein Scan</div>
+        </div>
+      </div>
+
+      <aside class="controls">
+        <label for="barcodeInput">Barcode (automatisch ausgefüllt beim Scan)</label>
+        <input id="barcodeInput" type="text" placeholder="z. B. 0123456789012" />
+
+        <label for="nameInput">Artikelname</label>
+        <input id="nameInput" type="text" placeholder="z. B. Milch 1L" />
+
+        <label for="priceInput">Preis (€)</label>
+        <input id="priceInput" type="number" step="0.01" min="0" placeholder="z. B. 1.49" />
+
+        <div style="display:flex;gap:8px;margin-top:10px">
+          <button id="saveBtn">Speichern</button>
+          <button id="saveLocalBtn" class="ghost">Nur lokal</button>
+        </div>
+
+        <div style="margin-top:12px">
+          <strong>Gespeicherte Artikel (Cloud)</strong>
+          <div id="listCloud" class="small">Lade...</div>
+        </div>
+
+        <div style="margin-top:10px">
+          <strong>Gespeichert lokal</strong>
+          <div id="listLocal" class="small">—</div>
+        </div>
+      </aside>
+    </div>
+  </div>
+
+<script>
+// ---- FIREBASE KONFIG ----
+const firebaseConfig = {
+            apiKey: "AIzaSyCzWfkyiB6zrROZpHsmitlm4MPuVVFT0HA",
+            authDomain: "cf-barcode.firebaseapp.com",
+            databaseURL: "https://cf-barcode-default-rtdb.firebaseio.com",
+            projectId: "cf-barcode",
+            storageBucket: "cf-barcode.firebasestorage.app",
+            messagingSenderId: "624260290171",
+            appId: "1:624260290171:web:d23cf061e28e95cef3f4de",
+            measurementId: "G-ZTSVPH1QCF"
+        };
+
+firebase.initializeApp(firebaseConfig);
+const db = firebase.firestore();
+
+// DOM
+const startBtn = document.getElementById('startBtn');
+const stopBtn = document.getElementById('stopBtn');
+const detectedDiv = document.getElementById('detected');
+const barcodeInput = document.getElementById('barcodeInput');
+const nameInput = document.getElementById('nameInput');
+const priceInput = document.getElementById('priceInput');
+const saveBtn = document.getElementById('saveBtn');
+const saveLocalBtn = document.getElementById('saveLocalBtn');
+const listCloud = document.getElementById('listCloud');
+const listLocal = document.getElementById('listLocal');
+
+let scanning = false;
+let lastCode = null;
+
+function startScanner(){
+  if(scanning) return;
+  scanning = true;
+  startBtn.style.display='none'; stopBtn.style.display='inline-block';
+
+  Quagga.init({
+    inputStream: {
+      name: 'Live',
+      type: 'LiveStream',
+      target: document.querySelector('#interactive'),
+      constraints: { facingMode: 'environment' }
+    },
+    decoder: { readers: ['code_128_reader','ean_reader','ean_8_reader','code_39_reader','upc_reader'] },
+    locate: true
+  }, function(err){
+    if(err){
+      console.error(err);
+      detectedDiv.textContent = 'Fehler beim Starten des Scanners: ' + err.message;
+      stopScanner();
+      return;
+    }
+    Quagga.start();
+  });
+
+  Quagga.onDetected(onDetected);
+}
+
+function stopScanner(){
+  if(!scanning) return;
+  Quagga.stop();
+  Quagga.offDetected(onDetected);
+  scanning = false;
+  startBtn.style.display='inline-block'; stopBtn.style.display='none';
+}
+
+function onDetected(result){
+  const code = result && result.codeResult && result.codeResult.code;
+  if(!code) return;
+  if(lastCode === code) return;
+  lastCode = code;
+
+  barcodeInput.value = code;
+  detectedDiv.innerHTML = '<strong>Gescannter Code:</strong> ' + code;
+
+  stopScanner();
+}
+
+startBtn.addEventListener('click', startScanner);
+stopBtn.addEventListener('click', stopScanner);
+
+// Speichern in Firestore
+saveBtn.addEventListener('click', async () => {
+  const code = barcodeInput.value.trim();
+  const name = nameInput.value.trim();
+  const priceRaw = priceInput.value;
+  const price = priceRaw === '' ? null : parseFloat(priceRaw);
+
+  if(!code){ alert('Bitte Barcode eingeben oder scannen.'); return; }
+
+  try{
+    await db.collection('barcodes').doc(code).set({
+      barcode: code,
+      name: name || null,
+      price: price,
+      createdAt: firebase.firestore.FieldValue.serverTimestamp(),
+      updatedAt: firebase.firestore.FieldValue.serverTimestamp()
+    }, { merge: true });
+    detectedDiv.innerHTML = '<span style="color:green">Erfolgreich in Firestore gespeichert.</span>';
+    loadCloudList();
+  }catch(e){
+    console.error(e);
+    alert('Fehler beim Speichern: ' + e.message);
+  }
+});
+
+// Lokal speichern
+saveLocalBtn.addEventListener('click', ()=>{
+  const code = barcodeInput.value.trim();
+  const name = nameInput.value.trim();
+  const priceRaw = priceInput.value;
+  const price = priceRaw === '' ? null : parseFloat(priceRaw);
+  if(!code){ alert('Bitte Barcode eingeben oder scannen.'); return; }
+
+  const arr = JSON.parse(localStorage.getItem('localBarcodes')||'[]');
+  const idx = arr.findIndex(x=>x.barcode===code);
+  const item = { barcode: code, name: name||null, price: price, date: new Date().toISOString() };
+  if(idx>-1) arr[idx]=item; else arr.push(item);
+  localStorage.setItem('localBarcodes', JSON.stringify(arr));
+  renderLocal();
+  detectedDiv.innerHTML = '<span style="color:green">Erfolgreich lokal gespeichert.</span>';
+});
+
+// Cloud-Daten laden
+async function loadCloudList(){
+  try{
+    const snap = await db.collection('barcodes').orderBy('updatedAt','desc').limit(10).get();
+    if(snap.empty){ listCloud.textContent='Keine Einträge.'; return; }
+    const rows = [];
+    snap.forEach(doc => {
+      const d = doc.data();
+      rows.push(`${d.barcode} ${d.name?'- '+d.name:''} ${d.price!=null?'- '+d.price.toFixed(2)+' €':''}`);
+    });
+    listCloud.innerHTML = rows.join('<br>');
+  }catch(e){
+    console.error(e);
+    listCloud.textContent = 'Fehler beim Laden: ' + e.message;
+  }
+}
+
+function renderLocal(){
+  const arr = JSON.parse(localStorage.getItem('localBarcodes')||'[]');
+  if(arr.length===0){ listLocal.textContent='Keine lokalen Einträge.'; return; }
+  listLocal.innerHTML = arr.map(i=>`${i.barcode} ${i.name?'- '+i.name:''} ${i.price!=null?'- '+i.price.toFixed(2)+' €':''}`).join('<br>');
+}
+
+renderLocal();
+loadCloudList();
+</script>
+</body>
+</html>
